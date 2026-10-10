@@ -6,6 +6,7 @@ A single-file tower defense game. Open `haiku-5-5-tower.html` in any modern brow
 
 ## How to play
 
+- Choose one of four maps with the Map button under the board. You can switch until the first wave is sent.
 - Pick a tower from the Arsenal panel (keys 1-4), then click open grass to place it. Esc or right-click cancels.
 - Click a placed tower to select it, then upgrade (U), move (M) or sell (Delete) it.
 - Send the next wave with N. Space pauses, and F toggles 2x speed.

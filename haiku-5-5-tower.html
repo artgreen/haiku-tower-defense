@@ -259,6 +259,7 @@
     color: var(--paper);
   }
   #director .dir-line em { font-style: normal; color: var(--brass-hi); }
+  #director #laneLine { margin-top: 8px; }
 
   /* ---------- buttons ---------- */
   .btn {
@@ -417,6 +418,28 @@
     line-height: 1.45;
     color: var(--paper-dim);
   }
+  /* ---------- map picker ---------- */
+  .overlay-card.map-card { width: 440px; padding: 22px 24px 20px; }
+  .overlay-card.map-card h1 { font-size: 28px; margin: 8px 0 6px; }
+  .overlay-card.map-card p { font-size: 14px; margin: 0 0 14px; }
+  .map-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+  .map-btn {
+    display: grid;
+    gap: 7px;
+    width: 100%;
+    padding: 8px;
+    text-align: left;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .map-btn canvas { display: block; width: 168px; height: 105px; max-width: 100%; border-radius: 3px; }
+  .map-btn.active {
+    border-color: var(--frost);
+    background: rgba(143, 216, 240, 0.09);
+    box-shadow: inset 0 0 0 1px rgba(143, 216, 240, 0.5);
+  }
+  .mb-name { display: block; font-size: 14.5px; font-weight: 700; letter-spacing: 0.04em; color: var(--paper); }
+  .mb-blurb { display: block; margin-top: 2px; font-size: 11px; line-height: 1.35; color: var(--paper-dim); }
 </style>
 </head>
 <body>
@@ -450,10 +473,20 @@
             <button id="playAgain" class="btn btn-main">Play again</button>
           </div>
         </div>
+        <div id="mapOverlay" class="overlay" hidden>
+          <div class="overlay-card map-card">
+            <div class="overlay-kicker">Campaign map</div>
+            <h1>Choose a map</h1>
+            <p id="mapNote">Pick a map. Switching restarts the build phase on the new map.</p>
+            <div id="mapList" class="map-grid"></div>
+            <button id="mapClose" class="btn">Close</button>
+          </div>
+        </div>
       </div>
       <div id="logBar" class="panel">
         <span class="tick-tag">Log</span>
         <span id="hMsg"></span>
+        <button id="mapBtn" class="btn btn-ghost">Map · Crossroads</button>
       </div>
       <div id="legend" class="panel"></div>
     </div>
@@ -462,6 +495,8 @@
       <section class="panel" id="director">
         <h2 class="title" id="dirTag">Next wave</h2>
         <div class="dir-line" id="dirLine"></div>
+        <div class="dir-line" id="laneLine">Enemies take <em id="laneName"></em></div>
+        <div class="hint" id="laneCover"></div>
       </section>
 
       <section class="panel" id="controls">
@@ -603,48 +638,64 @@
     { name: 'Void Tyrant',   hp: 3200, color: '#d6336c', summon: true, jam: true, slowResist: true, note: 'all three abilities' },
   ];
 
-  /* ================= Road ================= */
-  // The road is a loop: a shared entry, a fork, two lanes (north and south) that
-  // rejoin at a merge, then a shared exit road. Both lanes are the same length.
-  const CORE = [[-1, 7], [4, 7]];                 // entry road, ends at the fork
-  const LANES = {
-    north: [[4, 5], [12, 5], [12, 7]],            // fork -> north lane -> merge
-    south: [[4, 9], [12, 9], [12, 7]],            // fork -> south lane -> merge
-  };
-  const EXIT = [[16, 7], [16, 11], [21, 11], [21, 3], [24, 3]];
-
-  function buildRoute(lane) {
-    const cells = [...CORE, ...LANES[lane], ...EXIT];
-    const pts = cells.map(([c, r]) => ({ x: c * CELL + CELL / 2, y: r * CELL + CELL / 2 }));
-    const segs = [];
-    const cum = [0];
-    for (let i = 0; i < pts.length - 1; i++) {
-      const a = pts[i], b = pts[i + 1];
-      const len = Math.hypot(b.x - a.x, b.y - a.y);
-      segs.push({ x0: a.x, y0: a.y, x1: b.x, y1: b.y, start: cum[i], end: cum[i] + len, len });
-      cum.push(cum[i] + len);
-    }
-    return { lane, cells, pts, segs, cum, length: cum[cum.length - 1] };
-  }
-  const ROUTES = { north: buildRoute('north'), south: buildRoute('south') };
-  const FORK_D = ROUTES.north.cum[CORE.length - 1];
-  const MERGE_D = ROUTES.north.cum[CORE.length + LANES.north.length - 1];
-
-  function pointOn(route, d) {
-    for (const s of route.segs) {
-      if (d <= s.end) {
-        const t = Math.max(0, (d - s.start) / s.len);
-        return { x: s.x0 + (s.x1 - s.x0) * t, y: s.y0 + (s.y1 - s.y0) * t };
-      }
-    }
-    const last = route.pts[route.pts.length - 1];
-    return { x: last.x, y: last.y };
-  }
-
-  function inBounds(c, r) { return c >= 0 && c < COLS && r >= 0 && r < ROWS; }
-
-  const onPath = new Uint8Array(COLS * ROWS);
-  const LANE_CELLS = { north: [], south: [] };
+  /* ================= Maps ================= */
+  // A map is plain data. An entry road ends at a fork. One or more lanes leave the
+  // fork, and all of them rejoin at one merge cell. A shared exit road runs from the
+  // merge to the keep. Lanes may differ in length; each lane is timed along its own
+  // route. Cells are [column, row], and every step moves one cell along a row or a
+  // column. The entry starts off the left edge (column -1) and the exit ends off the
+  // right edge (column COLS).
+  const MAPS = [
+    {
+      name: 'Crossroads',
+      blurb: 'The original. Two lanes split, then rejoin before the exit.',
+      entry: [1, 7],
+      hills: [[160, 90, 200], [520, 470, 260], [860, 140, 170], [700, 300, 120]],
+      core: [[-1, 7], [4, 7]],
+      lanes: [
+        { name: 'North', tag: '▲ NORTH', cells: [[4, 5], [12, 5], [12, 7]] },
+        { name: 'South', tag: '▼ SOUTH', cells: [[4, 9], [12, 9], [12, 7]] },
+      ],
+      exit: [[16, 7], [16, 11], [21, 11], [21, 3], [24, 3]],
+    },
+    {
+      name: 'Long Way Round',
+      blurb: 'The north lane is short. The south lane loops far around.',
+      entry: [1, 2],
+      hills: [[200, 300, 220], [600, 120, 180], [800, 480, 240], [420, 520, 130]],
+      core: [[-1, 2], [3, 2]],
+      lanes: [
+        { name: 'North', tag: '▲ NORTH', cells: [[3, 0], [9, 0], [9, 2]] },
+        { name: 'South', tag: '▼ SOUTH', cells: [[3, 8], [9, 8], [9, 2]] },
+      ],
+      exit: [[16, 2], [16, 12], [21, 12], [21, 6], [24, 6]],
+    },
+    {
+      name: 'Twin Pass',
+      blurb: 'Wide lanes along the top and bottom. The middle covers both.',
+      entry: [1, 7],
+      hills: [[150, 120, 200], [480, 300, 260], [820, 520, 220], [860, 130, 150]],
+      core: [[-1, 7], [6, 7]],
+      lanes: [
+        { name: 'North', tag: '▲ NORTH', cells: [[6, 1], [18, 1], [18, 7]] },
+        { name: 'South', tag: '▼ SOUTH', cells: [[6, 13], [18, 13], [18, 7]] },
+      ],
+      exit: [[24, 7]],
+    },
+    {
+      name: 'Triple Fork',
+      blurb: 'Three lanes split at the fork. Enemies take the quietest.',
+      entry: [1, 7],
+      hills: [[120, 500, 200], [520, 90, 240], [760, 300, 180], [330, 300, 110]],
+      core: [[-1, 7], [4, 7]],
+      lanes: [
+        { name: 'North', tag: '▲ NORTH', cells: [[4, 3], [12, 3], [12, 7]] },
+        { name: 'Middle', tag: '■ MIDDLE', cells: [[12, 7]] },
+        { name: 'South', tag: '▼ SOUTH', cells: [[4, 11], [12, 11], [12, 7]] },
+      ],
+      exit: [[16, 7], [16, 1], [21, 1], [21, 13], [24, 13]],
+    },
+  ];
 
   function walkCells(cells, visit) {
     for (let i = 0; i < cells.length - 1; i++) {
@@ -659,29 +710,100 @@
       }
     }
   }
-  walkCells(ROUTES.north.cells, (c, r) => { if (inBounds(c, r)) onPath[r * COLS + c] = 1; });
-  walkCells(ROUTES.south.cells, (c, r) => { if (inBounds(c, r)) onPath[r * COLS + c] = 1; });
-  for (const lane of ['north', 'south']) {
-    walkCells([CORE[1], ...LANES[lane]], (c, r) => { if (inBounds(c, r)) LANE_CELLS[lane].push([c, r]); });
+
+  function inBounds(c, r) { return c >= 0 && c < COLS && r >= 0 && r < ROWS; }
+
+  function buildRoute(cells) {
+    const pts = cells.map(([c, r]) => ({ x: c * CELL + CELL / 2, y: r * CELL + CELL / 2 }));
+    const segs = [];
+    const cum = [0];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1];
+      const len = Math.hypot(b.x - a.x, b.y - a.y);
+      segs.push({ x0: a.x, y0: a.y, x1: b.x, y1: b.y, start: cum[i], end: cum[i] + len, len });
+      cum.push(cum[i] + len);
+    }
+    return { cells, pts, segs, cum, length: cum[cum.length - 1] };
   }
 
-  function isPath(c, r) { return inBounds(c, r) && onPath[r * COLS + c] === 1; }
+  function pointOn(route, d) {
+    for (const s of route.segs) {
+      if (d <= s.end) {
+        const t = Math.max(0, (d - s.start) / s.len);
+        return { x: s.x0 + (s.x1 - s.x0) * t, y: s.y0 + (s.y1 - s.y0) * t };
+      }
+    }
+    const last = route.pts[route.pts.length - 1];
+    return { x: last.x, y: last.y };
+  }
 
   function sampleRoute(route, d0, d1) {
     const out = [];
     for (let d = d0; d <= d1 + 1e-6; d += SAMPLE_STEP) out.push(pointOn(route, d));
     return out;
   }
-  const LANE_SAMPLES = {
-    north: sampleRoute(ROUTES.north, FORK_D, MERGE_D),
-    south: sampleRoute(ROUTES.south, FORK_D, MERGE_D),
-  };
-  const EXIT_SAMPLES = sampleRoute(ROUTES.north, MERGE_D, ROUTES.north.length);
-  const ZONES = [
-    { name: 'North road', samples: LANE_SAMPLES.north },
-    { name: 'South road', samples: LANE_SAMPLES.south },
-    { name: 'Exit road', samples: EXIT_SAMPLES },
-  ];
+
+  function buildMap(def) {
+    const coreEnd = def.core.length - 1;
+    const merge = def.lanes[0].cells[def.lanes[0].cells.length - 1];
+    const lanes = def.lanes.map((laneDef, index) => {
+      const route = buildRoute([...def.core, ...laneDef.cells, ...def.exit]);
+      const tiles = [];
+      walkCells([def.core[coreEnd], ...laneDef.cells], (c, r) => { if (inBounds(c, r)) tiles.push([c, r]); });
+      return {
+        index,
+        name: laneDef.name,
+        tag: laneDef.tag,
+        route,
+        tiles,
+        mergeD: route.cum[def.core.length + laneDef.cells.length - 1],
+      };
+    });
+    const forkD = lanes[0].route.cum[coreEnd];
+    const onPath = new Uint8Array(COLS * ROWS);
+    for (const lane of lanes) {
+      walkCells(lane.route.cells, (c, r) => { if (inBounds(c, r)) onPath[r * COLS + c] = 1; });
+      lane.samples = sampleRoute(lane.route, forkD, lane.mergeD);
+    }
+
+    // Coverage zones for the director: each lane, then the shared exit road.
+    const zones = lanes.map(lane => ({ name: `${lane.name} road`, samples: lane.samples }));
+    zones.push({ name: 'Exit road', samples: sampleRoute(lanes[0].route, lanes[0].mergeD, lanes[0].route.length) });
+
+    // The keep stands on the last on-board cell of the exit road.
+    let keep = [COLS - 1, 0];
+    walkCells([merge, ...def.exit], (c, r) => { if (inBounds(c, r)) keep = [c, r]; });
+
+    return {
+      name: def.name,
+      blurb: def.blurb,
+      entry: def.entry,
+      hills: def.hills,
+      keep,
+      lanes,
+      zones,
+      forkD,
+      forkPt: lanes[0].route.pts[coreEnd],
+      onPath,
+    };
+  }
+
+  const builtMaps = [];
+  let mapIndex = 0;
+  let activeMap = null;   // the map being played
+
+  function getBuiltMap(index) {
+    if (!builtMaps[index]) builtMaps[index] = buildMap(MAPS[index]);
+    return builtMaps[index];
+  }
+
+  function setMap(index) {
+    mapIndex = index;
+    activeMap = getBuiltMap(index);
+    buildBackground();
+  }
+
+  function isPath(c, r) { return inBounds(c, r) && activeMap.onPath[r * COLS + c] === 1; }
 
   /* ================= Helpers ================= */
   function makeRng(seed) {
@@ -774,7 +896,7 @@
 
     // Topographic rings (decorative)
     g.lineWidth = 1;
-    const hills = [[160, 90, 200], [520, 470, 260], [860, 140, 170], [700, 300, 120]];
+    const hills = activeMap.hills;
     for (const [hx, hy, hr] of hills) {
       for (let k = 1; k <= 6; k++) {
         g.beginPath();
@@ -817,13 +939,13 @@
       }
     }
 
-    // Road centerlines (both lanes, dashed)
+    // Road centerlines (every lane, dashed)
     g.save();
     g.setLineDash([5, 9]);
     g.strokeStyle = 'rgba(255,244,214,0.28)';
     g.lineWidth = 2;
-    for (const lane of ['north', 'south']) {
-      const pts = ROUTES[lane].pts;
+    for (const lane of activeMap.lanes) {
+      const pts = lane.route.pts;
       g.beginPath();
       g.moveTo(pts[0].x, pts[0].y);
       for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
@@ -857,10 +979,10 @@
     g.font = `bold 9px ${MONO}`;
     g.textAlign = 'center';
     g.textBaseline = 'middle';
-    g.fillText('ENTRY', 1 * CELL + CELL / 2, 7 * CELL + CELL / 2);
+    g.fillText('ENTRY', activeMap.entry[0] * CELL + CELL / 2, activeMap.entry[1] * CELL + CELL / 2);
 
     // Keep at the exit
-    const bx = 23 * CELL + CELL / 2, by = 3 * CELL + CELL / 2;
+    const bx = activeMap.keep[0] * CELL + CELL / 2, by = activeMap.keep[1] * CELL + CELL / 2;
     g.fillStyle = '#2a1d14';
     g.beginPath(); g.arc(bx, by, 19, 0, TAU); g.fill();
     g.strokeStyle = '#c9a24a';
@@ -885,7 +1007,7 @@
   const el = {
     gold: $('hGold'), lives: $('hLives'), wave: $('hWave'), enemies: $('hEnemies'),
     pBars: $('pBars'), pLabel: $('pLabel'), status: $('hStatus'), restart: $('restartBtn'),
-    msg: $('hMsg'), dirTag: $('dirTag'), dirLine: $('dirLine'),
+    msg: $('hMsg'), dirTag: $('dirTag'), dirLine: $('dirLine'), laneName: $('laneName'), laneCover: $('laneCover'),
     send: $('sendBtn'), nextInfo: $('nextInfo'), speed: $('speedBtn'), pause: $('pauseBtn'),
     towerList: $('towerList'), legend: $('legend'),
     insEmpty: $('insEmpty'), insBody: $('insBody'), insIcon: $('insIcon'),
@@ -893,6 +1015,7 @@
     up: $('upBtn'), upCost: $('upCost'), move: $('moveBtn'), moveLabel: $('moveLabel'), moveFee: $('moveFee'),
     sell: $('sellBtn'), sellVal: $('sellVal'),
     endOverlay: $('endOverlay'), endTitle: $('endTitle'), endText: $('endText'), playAgain: $('playAgain'),
+    mapBtn: $('mapBtn'), mapOverlay: $('mapOverlay'), mapList: $('mapList'), mapNote: $('mapNote'), mapClose: $('mapClose'),
   };
   const pressureSegs = [];
   const towerBtns = {};
@@ -937,7 +1060,7 @@
       paused: false, speed: 1, over: false, victory: false,
       kills: 0, leakFlash: 0, leaks: 0,
       pressure: 0, waveMult: 1,
-      laneCount: { north: 0, south: 0 }, lastLane: null,
+      laneCount: activeMap.lanes.map(() => 0), lastLane: -1,
     };
     lastPressure = state.pressure;
     el.endOverlay.hidden = true;
@@ -960,6 +1083,93 @@
     resetGame();
   }
 
+  /* ================= Map picker ================= */
+  // Maps can change only before wave 1 is sent. Switching resets the board, so a map
+  // that already has towers on it asks for a second click, the same as Restart.
+  const MAP_NOTE = 'Pick a map. Switching restarts the build phase on the new map.';
+  const mapBtns = [];
+  let armedMap = null;   // { index, at } after a first click on a map while towers stand
+
+  function mapLocked() { return state.wave > 0; }
+
+  function openMapPicker() {
+    if (mapLocked()) return;
+    armedMap = null;
+    setText(el.mapNote, MAP_NOTE);
+    el.mapOverlay.hidden = false;
+  }
+
+  function closeMapPicker() {
+    el.mapOverlay.hidden = true;
+    armedMap = null;
+  }
+
+  function pickMap(index) {
+    if (mapLocked()) return;
+    if (index === mapIndex) { closeMapPicker(); return; }
+    const now = performance.now();
+    const n = towers.length;
+    if (n > 0 && !(armedMap && armedMap.index === index && now - armedMap.at < 3000)) {
+      armedMap = { index, at: now };
+      setText(el.mapNote, `Click ${MAPS[index].name} again within 3 seconds to clear ${n} tower${n === 1 ? '' : 's'}.`);
+      setTimeout(() => {
+        if (armedMap && armedMap.at === now) { armedMap = null; setText(el.mapNote, MAP_NOTE); }
+      }, 3000);
+      return;
+    }
+    closeMapPicker();
+    setMap(index);
+    resetGame();
+    setMsg(`Map changed to ${MAPS[index].name}. ${MAPS[index].blurb}`, '');
+  }
+
+  // A static preview of a map: road tiles, with a dot on the keep.
+  function drawMapThumb(cv, built) {
+    const g = cv.getContext('2d');
+    const s = cv.width / COLS;
+    g.fillStyle = '#414d33';
+    g.fillRect(0, 0, cv.width, cv.height);
+    g.fillStyle = '#b29a69';
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (built.onPath[r * COLS + c]) g.fillRect(c * s, r * s, s, s);
+      }
+    }
+    g.fillStyle = '#e4553b';
+    g.beginPath();
+    g.arc((built.keep[0] + 0.5) * s, (built.keep[1] + 0.5) * s, s * 0.7, 0, TAU);
+    g.fill();
+  }
+
+  function buildMapPicker() {
+    MAPS.forEach((def, i) => {
+      const btn = make('button', 'btn map-btn');
+      const cv = make('canvas');
+      cv.width = 168;
+      cv.height = 105;
+      drawMapThumb(cv, getBuiltMap(i));
+      const text = make('span', 'mb-text');
+      text.append(make('span', 'mb-name', def.name), make('span', 'mb-blurb', def.blurb));
+      btn.append(cv, text);
+      on(btn, () => pickMap(i));
+      el.mapList.appendChild(btn);
+      mapBtns.push(btn);
+    });
+  }
+
+  // Keeps the Map button and the picker in step with the campaign.
+  function syncMapPicker() {
+    const locked = mapLocked();
+    setText(el.mapBtn, `Map · ${activeMap.name}`);
+    el.mapBtn.disabled = locked;
+    el.mapBtn.title = locked ? 'Maps can change until the first wave is sent' : 'Choose a map';
+    if (locked) closeMapPicker();
+    mapBtns.forEach((b, i) => {
+      b.disabled = locked;
+      b.classList.toggle('active', i === mapIndex);
+    });
+  }
+
   /* ================= Fork & coverage ================= */
   function zoneCoverage(samples) {
     let total = 0;
@@ -976,20 +1186,26 @@
     return total;
   }
 
-  // Each enemy picks the lane with less tower DPS coverage when it reaches the fork.
-  // Ties alternate so an undefended fork splits the wave evenly.
+  // Each enemy takes the lane with the least tower DPS coverage when it reaches the
+  // fork. Lanes within one point of each other count as tied. Ties go to the lane
+  // that fewer enemies have taken this wave, then rotate through the lanes in order.
   function chooseLane(commit) {
-    const north = zoneCoverage(LANE_SAMPLES.north);
-    const south = zoneCoverage(LANE_SAMPLES.south);
-    let pick;
-    if (Math.abs(north - south) >= 1) pick = north < south ? 'north' : 'south';
-    else if (state.laneCount.north !== state.laneCount.south) pick = state.laneCount.north < state.laneCount.south ? 'north' : 'south';
-    else pick = state.lastLane === 'north' ? 'south' : 'north';
-    if (commit) {
-      state.laneCount[pick] += 1;
-      state.lastLane = pick;
+    const lanes = activeMap.lanes;
+    const covs = lanes.map(lane => zoneCoverage(lane.samples));
+    const least = Math.min(...covs);
+    let pool = lanes.filter((_, i) => covs[i] < least + 1);
+    const fewest = Math.min(...pool.map(lane => state.laneCount[lane.index]));
+    pool = pool.filter(lane => state.laneCount[lane.index] === fewest);
+    let pick = pool[0];
+    for (let k = 1; k <= lanes.length; k++) {
+      const next = lanes[(state.lastLane + k + lanes.length) % lanes.length];
+      if (pool.includes(next)) { pick = next; break; }
     }
-    return { lane: pick, north, south };
+    if (commit) {
+      state.laneCount[pick.index] += 1;
+      state.lastLane = pick.index;
+    }
+    return { index: pick.index, lane: pick, covs };
   }
 
   function bestTowerInRange(x, y, range) {
@@ -1015,7 +1231,7 @@
       total += d;
     }
     const share = k => (total > 0 ? dps[k] / total : 0);
-    const zones = ZONES.map(z => ({ name: z.name, cov: zoneCoverage(z.samples) }));
+    const zones = activeMap.zones.map(z => ({ name: z.name, cov: zoneCoverage(z.samples) }));
     let weak = null;
     if (towers.length) {
       const mean = zones.reduce((a, z) => a + z.cov, 0) / zones.length;
@@ -1098,7 +1314,7 @@
   function initEnemy(e) {
     e.maxHp = e.hp;
     e.d = 0;
-    e.route = ROUTES.north;
+    e.route = activeMap.lanes[0].route;
     e.lane = null;
     e.decided = false;
     e.ang = 0;
@@ -1178,11 +1394,11 @@
       e.slowT -= h;
       mult = e.slow;
     }
-    if (!e.decided && e.d >= FORK_D) {
+    if (!e.decided && e.d >= activeMap.forkD) {
       const pick = chooseLane(true);
       e.decided = true;
-      e.lane = pick.lane;
-      e.route = ROUTES[pick.lane];
+      e.lane = pick.index;
+      e.route = pick.lane.route;
     }
     const px = e.x, py = e.y;
     e.d += e.speed * mult * h;
@@ -1469,7 +1685,7 @@
     towers.push(t);
     grid[row * COLS + col] = t;
     addRing(t.x, t.y, 12, 32, 0.35, def.color, false);
-    setMsg(`${def.name} raised. Check the fork label before the next wave.`, 'good');
+    setMsg(`${def.name} raised. The Next wave panel shows which lane comes next.`, 'good');
   }
 
   function moveFee(t) {
@@ -1509,7 +1725,7 @@
     moving = null;
     selected = t;
     addRing(t.x, t.y, 12, 34, 0.35, def.color, false);
-    setMsg(`${def.name} relocated for ${fee} gold. Watch the fork label change.`, 'good');
+    setMsg(`${def.name} relocated for ${fee} gold. Watch the Next wave panel for the lane change.`, 'good');
   }
 
   function upgradeTower(t) {
@@ -1604,7 +1820,7 @@
     state.spawnT = 0.6;
     state.waveActive = true;
     state.leaks = 0;
-    state.laneCount = { north: 0, south: 0 };
+    state.laneCount = activeMap.lanes.map(() => 0);
     if (plan.boss) {
       setMsg(`Wave ${w}: ${plan.boss.name} marches. It ${plan.boss.note}.`, 'bad');
     } else {
@@ -1732,35 +1948,13 @@
   }
 
   function drawLaneHeat(info) {
-    const max = Math.max(info.north, info.south, 1e-6);
-    for (const lane of ['north', 'south']) {
-      const v = info[lane] / max;
-      if (v <= 0) continue;
+    const max = Math.max(...info.covs, 1e-6);
+    activeMap.lanes.forEach((lane, i) => {
+      const v = info.covs[i] / max;
+      if (v <= 0) return;
       ctx.fillStyle = `rgba(228,85,59,${(0.08 + 0.22 * v).toFixed(3)})`;
-      for (const [c, r] of LANE_CELLS[lane]) ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
-    }
-  }
-
-  function drawForkLabel(info) {
-    const f = ROUTES.north.pts[1];
-    const bw = 124, bh = 38;
-    const x = f.x - bw / 2, y = f.y - 54;
-    ctx.save();
-    ctx.fillStyle = 'rgba(11,14,17,0.88)';
-    rrPath(ctx, x, y, bw, bh, 4);
-    ctx.fill();
-    ctx.strokeStyle = '#c9a24a';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = `bold 11px ${MONO}`;
-    ctx.fillStyle = '#ebcb7a';
-    ctx.fillText(`NEXT ${info.lane === 'north' ? '▲ NORTH' : '▼ SOUTH'}`, f.x, y + 12);
-    ctx.font = `10px ${MONO}`;
-    ctx.fillStyle = '#c8bfa6';
-    ctx.fillText(`N ${info.north.toFixed(0)}  ·  S ${info.south.toFixed(0)}`, f.x, y + 27);
-    ctx.restore();
+      for (const [c, r] of lane.tiles) ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
+    });
   }
 
   function drawTurret(c, type) {
@@ -2213,7 +2407,6 @@
     for (const e of enemies) drawEnemy(e);
     for (const p of projectiles) drawProjectile(p);
     drawEffects();
-    drawForkLabel(lanes);
     drawPopups();
 
     if (state.leakFlash > 0) {
@@ -2405,6 +2598,11 @@
       setText(el.dirLine, 'All waves have been sent.');
     }
 
+    // Lane readout: the lane the next enemies take, and the coverage behind that choice.
+    const pick = chooseLane(false);
+    setText(el.laneName, pick.lane.tag);
+    setText(el.laneCover, `Coverage: ${activeMap.lanes.map((lane, i) => `${lane.name} ${pick.covs[i].toFixed(0)}`).join(' · ')}`);
+
     el.send.disabled = state.over || state.waveActive || state.wave >= MAX_WAVE;
     const next = state.wave + 1;
     setText(el.nextInfo, state.over ? 'Campaign over.'
@@ -2413,6 +2611,7 @@
     setText(el.speed, `Speed ${state.speed}x`);
     setText(el.pause, state.paused ? 'Resume' : 'Pause');
     el.pause.disabled = state.over;
+    syncMapPicker();
 
     for (const type of TOWER_ORDER) {
       const b = towerBtns[type];
@@ -2441,6 +2640,9 @@
     on(el.pause, togglePause);
     on(el.restart, askRestart);
     on(el.playAgain, resetGame);
+    on(el.mapBtn, openMapPicker);
+    on(el.mapClose, closeMapPicker);
+    el.mapOverlay.addEventListener('click', e => { if (e.target === el.mapOverlay) closeMapPicker(); });
     on(el.up, () => upgradeTower(selected));
     on(el.move, () => (moving ? cancelMove() : startMove(selected)));
     on(el.sell, () => sellTower(selected));
@@ -2459,7 +2661,7 @@
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const k = e.key;
       if (/^[1-4]$/.test(k)) toggleBuild(TOWER_ORDER[Number(k) - 1]);
-      else if (k === 'Escape') cancelAll();
+      else if (k === 'Escape') { if (el.mapOverlay.hidden) cancelAll(); else closeMapPicker(); }
       else if (k === ' ') { e.preventDefault(); togglePause(); }
       else if (k === 'n' || k === 'N') sendWave();
       else if (k === 'f' || k === 'F') toggleSpeed();
@@ -2506,10 +2708,11 @@
   }
 
   /* ================= Boot ================= */
-  buildBackground();
+  setMap(0);
   buildLegend();
   buildPressure();
   buildTowerList();
+  buildMapPicker();
   bindInput();
   resetGame();
   fit();
