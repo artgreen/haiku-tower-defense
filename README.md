@@ -2,6 +2,8 @@
 
 A single-file tower defense game. Open `haiku-5-5-tower.html` in any modern browser. There is no build step and no dependencies.
 
+**Play it in your browser:** https://artgreen.github.io/haiku-tower-defense/
+
 ## How to play
 
 - Pick a tower from the Arsenal panel (keys 1-4), then click open grass to place it. Esc or right-click cancels.
