@@ -259,6 +259,7 @@
     color: var(--paper);
   }
   #director .dir-line em { font-style: normal; color: var(--brass-hi); }
+  #director #laneLine { margin-top: 8px; }
 
   /* ---------- buttons ---------- */
   .btn {
@@ -494,6 +495,8 @@
       <section class="panel" id="director">
         <h2 class="title" id="dirTag">Next wave</h2>
         <div class="dir-line" id="dirLine"></div>
+        <div class="dir-line" id="laneLine">Enemies take <em id="laneName"></em></div>
+        <div class="hint" id="laneCover"></div>
       </section>
 
       <section class="panel" id="controls">
@@ -1004,7 +1007,7 @@
   const el = {
     gold: $('hGold'), lives: $('hLives'), wave: $('hWave'), enemies: $('hEnemies'),
     pBars: $('pBars'), pLabel: $('pLabel'), status: $('hStatus'), restart: $('restartBtn'),
-    msg: $('hMsg'), dirTag: $('dirTag'), dirLine: $('dirLine'),
+    msg: $('hMsg'), dirTag: $('dirTag'), dirLine: $('dirLine'), laneName: $('laneName'), laneCover: $('laneCover'),
     send: $('sendBtn'), nextInfo: $('nextInfo'), speed: $('speedBtn'), pause: $('pauseBtn'),
     towerList: $('towerList'), legend: $('legend'),
     insEmpty: $('insEmpty'), insBody: $('insBody'), insIcon: $('insIcon'),
@@ -1682,7 +1685,7 @@
     towers.push(t);
     grid[row * COLS + col] = t;
     addRing(t.x, t.y, 12, 32, 0.35, def.color, false);
-    setMsg(`${def.name} raised. Check the fork label before the next wave.`, 'good');
+    setMsg(`${def.name} raised. The Next wave panel shows which lane comes next.`, 'good');
   }
 
   function moveFee(t) {
@@ -1722,7 +1725,7 @@
     moving = null;
     selected = t;
     addRing(t.x, t.y, 12, 34, 0.35, def.color, false);
-    setMsg(`${def.name} relocated for ${fee} gold. Watch the fork label change.`, 'good');
+    setMsg(`${def.name} relocated for ${fee} gold. Watch the Next wave panel for the lane change.`, 'good');
   }
 
   function upgradeTower(t) {
@@ -1952,31 +1955,6 @@
       ctx.fillStyle = `rgba(228,85,59,${(0.08 + 0.22 * v).toFixed(3)})`;
       for (const [c, r] of lane.tiles) ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
     });
-  }
-
-  function drawForkLabel(info) {
-    const f = activeMap.forkPt;
-    const bh = 38;
-    const counts = activeMap.lanes.map((lane, i) => `${lane.name.charAt(0)} ${info.covs[i].toFixed(0)}`).join('  ·  ');
-    ctx.save();
-    ctx.font = `10px ${MONO}`;
-    const bw = Math.max(124, ctx.measureText(counts).width + 20);
-    const x = f.x - bw / 2, y = f.y - 54;
-    ctx.fillStyle = 'rgba(11,14,17,0.88)';
-    rrPath(ctx, x, y, bw, bh, 4);
-    ctx.fill();
-    ctx.strokeStyle = '#c9a24a';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = `bold 11px ${MONO}`;
-    ctx.fillStyle = '#ebcb7a';
-    ctx.fillText(`NEXT ${info.lane.tag}`, f.x, y + 12);
-    ctx.font = `10px ${MONO}`;
-    ctx.fillStyle = '#c8bfa6';
-    ctx.fillText(counts, f.x, y + 27);
-    ctx.restore();
   }
 
   function drawTurret(c, type) {
@@ -2429,7 +2407,6 @@
     for (const e of enemies) drawEnemy(e);
     for (const p of projectiles) drawProjectile(p);
     drawEffects();
-    drawForkLabel(lanes);
     drawPopups();
 
     if (state.leakFlash > 0) {
@@ -2620,6 +2597,11 @@
       setText(el.dirTag, 'Director');
       setText(el.dirLine, 'All waves have been sent.');
     }
+
+    // Lane readout: the lane the next enemies take, and the coverage behind that choice.
+    const pick = chooseLane(false);
+    setText(el.laneName, pick.lane.tag);
+    setText(el.laneCover, `Coverage: ${activeMap.lanes.map((lane, i) => `${lane.name} ${pick.covs[i].toFixed(0)}`).join(' · ')}`);
 
     el.send.disabled = state.over || state.waveActive || state.wave >= MAX_WAVE;
     const next = state.wave + 1;
